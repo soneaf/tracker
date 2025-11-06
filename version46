@@ -1,0 +1,1677 @@
+<!doctype html>
+<html lang="en">
+ <head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Basketball Stats Tracker</title>
+  <link rel="icon" type="image/png" href="https://raw.githubusercontent.com/soneaf/tracker/refs/heads/main/MVA_eagle.png">
+  <link rel="shortcut icon" type="image/png" href="https://raw.githubusercontent.com/soneaf/tracker/refs/heads/main/MVA_eagle.png">
+  <link rel="apple-touch-icon" href="https://raw.githubusercontent.com/soneaf/tracker/refs/heads/main/MVA_eagle.png">
+  <script src="/_sdk/data_sdk.js"></script>
+  <script src="/_sdk/element_sdk.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      height: 100%;
+    }
+    html {
+      height: 100%;
+    }
+    
+    @keyframes confettiFall {
+      0% {
+        transform: translateY(-20px) rotate(0deg);
+        opacity: 1;
+      }
+      100% {
+        transform: translateY(100vh) rotate(720deg);
+        opacity: 0;
+      }
+    }
+  </style>
+  <style>@view-transition { navigation: auto; }</style>
+ </head>
+ <body class="min-h-full">
+  <div id="app" class="min-h-full p-6"></div>
+  <script>
+    const defaultConfig = {
+      player_name: "Enzo",
+      team_name: "Team",
+      background_color: "#521f4f",
+      surface_color: "#6e2969",
+      text_color: "#ffffff",
+      primary_action_color: "#f8d35d",
+      secondary_action_color: "#521f4f"
+    };
+
+    let allGames = [];
+    let isSubmitting = false;
+    let liveStats = {
+      points: 0,
+      rebounds: 0,
+      assists: 0,
+      steals: 0,
+      blocks: 0,
+      turnovers: 0,
+      fouls: 0,
+      field_goals_made: 0,
+      field_goals_attempted: 0,
+      three_pointers_made: 0,
+      three_pointers_attempted: 0,
+      free_throws_made: 0,
+      free_throws_attempted: 0,
+      minutes_played: 0
+    };
+    let undoStack = [];
+    let currentPeriod = 1;
+    let gameFormat = '4quarters'; // '4quarters' or '2halves'
+    let periodStats = {};
+    let isOnline = navigator.onLine;
+    let pendingGameData = null;
+
+    // Offline support functions
+    function saveToLocalStorage() {
+      const gameState = {
+        liveStats: liveStats,
+        undoStack: undoStack,
+        currentPeriod: currentPeriod,
+        gameFormat: gameFormat,
+        periodStats: periodStats,
+        timestamp: Date.now()
+      };
+      localStorage.setItem('basketballStatsBackup', JSON.stringify(gameState));
+    }
+
+    function loadFromLocalStorage() {
+      try {
+        const saved = localStorage.getItem('basketballStatsBackup');
+        if (saved) {
+          const gameState = JSON.parse(saved);
+          // Only restore if it's from the last 24 hours
+          if (Date.now() - gameState.timestamp < 24 * 60 * 60 * 1000) {
+            liveStats = gameState.liveStats || liveStats;
+            undoStack = gameState.undoStack || [];
+            currentPeriod = gameState.currentPeriod || 1;
+            gameFormat = gameState.gameFormat || '4quarters';
+            periodStats = gameState.periodStats || {};
+            return true;
+          }
+        }
+      } catch (e) {
+        console.log('Could not restore backup data');
+      }
+      return false;
+    }
+
+    function clearLocalStorageBackup() {
+      localStorage.removeItem('basketballStatsBackup');
+    }
+
+    function showOfflineMessage() {
+      showMessage('📱 You\'re offline - your stats are being saved locally and will sync when you\'re back online!', false);
+    }
+
+    function showOnlineMessage() {
+      showMessage('🌐 You\'re back online! Your stats are safe.', false);
+    }
+
+    // Network status monitoring
+    window.addEventListener('online', () => {
+      isOnline = true;
+      showOnlineMessage();
+      updateNetworkStatus();
+      
+      // Try to submit pending game data if any
+      if (pendingGameData) {
+        submitPendingGame();
+      }
+    });
+
+    window.addEventListener('offline', () => {
+      isOnline = false;
+      showOfflineMessage();
+      updateNetworkStatus();
+    });
+
+    function updateNetworkStatus() {
+      const statusIndicator = document.getElementById('network-status');
+      if (statusIndicator) {
+        if (isOnline) {
+          statusIndicator.innerHTML = '🌐 Online';
+          statusIndicator.style.backgroundColor = '#10b981';
+        } else {
+          statusIndicator.innerHTML = '📱 Offline';
+          statusIndicator.style.backgroundColor = '#f59e0b';
+        }
+      }
+    }
+
+    async function submitPendingGame() {
+      if (!pendingGameData || !isOnline) return;
+      
+      const result = await window.dataSdk.create(pendingGameData);
+      if (result.isOk) {
+        pendingGameData = null;
+        localStorage.removeItem('pendingGameData');
+        showMessage('🎉 Offline game data successfully synced!', false);
+      }
+    }
+
+    const dataHandler = {
+      onDataChanged(data) {
+        allGames = data;
+        renderStats();
+      }
+    };
+
+    function initializePeriodStats() {
+      periodStats = {};
+      const maxPeriods = gameFormat === '4quarters' ? 4 : 2;
+      
+      for (let i = 1; i <= maxPeriods; i++) {
+        periodStats[i] = {
+          points: 0,
+          rebounds: 0,
+          assists: 0,
+          steals: 0,
+          blocks: 0,
+          turnovers: 0,
+          fouls: 0,
+          field_goals_made: 0,
+          field_goals_attempted: 0,
+          three_pointers_made: 0,
+          three_pointers_attempted: 0,
+          free_throws_made: 0,
+          free_throws_attempted: 0
+        };
+      }
+    }
+
+    function updatePeriodDisplay() {
+      const periodDisplay = document.getElementById('current-period-display');
+      const prevBtn = document.getElementById('prev-period-btn');
+      const nextBtn = document.getElementById('next-period-btn');
+      
+      if (!periodDisplay) return;
+      
+      const maxPeriods = gameFormat === '4quarters' ? 4 : 2;
+      const periodLabel = gameFormat === '4quarters' ? 'Q' : 'H';
+      
+      periodDisplay.textContent = `${periodLabel}${currentPeriod}`;
+      
+      if (prevBtn) prevBtn.disabled = currentPeriod <= 1;
+      if (nextBtn) nextBtn.disabled = currentPeriod >= maxPeriods;
+    }
+
+    function changePeriod(direction) {
+      const maxPeriods = gameFormat === '4quarters' ? 4 : 2;
+      
+      if (direction === 'next' && currentPeriod < maxPeriods) {
+        currentPeriod++;
+      } else if (direction === 'prev' && currentPeriod > 1) {
+        currentPeriod--;
+      }
+      
+      updatePeriodDisplay();
+      updatePeriodStatsDisplay();
+    }
+
+    function changeGameFormat(newFormat) {
+      gameFormat = newFormat;
+      currentPeriod = 1;
+      initializePeriodStats();
+      updatePeriodDisplay();
+      updatePeriodStatsDisplay();
+    }
+
+    function updatePeriodStatsDisplay() {
+      const container = document.getElementById('period-stats-display');
+      if (!container) return;
+      
+      const config = window.elementSdk?.config || defaultConfig;
+      const backgroundColor = config.background_color || defaultConfig.background_color;
+      const textColor = config.text_color || defaultConfig.text_color;
+      const primaryColor = config.primary_action_color || defaultConfig.primary_action_color;
+      
+      const maxPeriods = gameFormat === '4quarters' ? 4 : 2;
+      const periodLabel = gameFormat === '4quarters' ? 'Q' : 'H';
+      
+      let html = `
+        <div class="mb-6">
+          <h4 class="text-lg font-semibold mb-4 opacity-90" style="color: ${textColor};">📊 Period Breakdown</h4>
+          <div class="grid grid-cols-${maxPeriods} gap-3">
+      `;
+      
+      for (let i = 1; i <= maxPeriods; i++) {
+        const stats = periodStats[i] || {};
+        const isCurrentPeriod = i === currentPeriod;
+        
+        html += `
+          <div class="p-4 rounded-lg text-center ${isCurrentPeriod ? 'ring-2' : ''}" style="background-color: rgba(0,0,0,0.3); ${isCurrentPeriod ? `border-color: ${primaryColor}; ring-color: ${primaryColor};` : ''}">
+            <div class="font-bold text-sm mb-2" style="color: ${isCurrentPeriod ? primaryColor : textColor};">${periodLabel}${i}</div>
+            <div class="text-xl font-black mb-1" style="color: ${primaryColor};">${stats.points || 0}</div>
+            <div class="text-xs opacity-80" style="color: ${textColor};">PTS</div>
+            <div class="text-xs mt-2 space-y-1" style="color: ${textColor}; opacity: 0.7;">
+              <div>REB: ${stats.rebounds || 0}</div>
+              <div>AST: ${stats.assists || 0}</div>
+              <div>FG: ${stats.field_goals_made || 0}/${stats.field_goals_attempted || 0}</div>
+            </div>
+          </div>
+        `;
+      }
+      
+      html += `
+          </div>
+        </div>
+      `;
+      
+      container.innerHTML = html;
+    }
+
+    async function onConfigChange(config) {
+      const playerName = config.player_name || defaultConfig.player_name;
+      const teamName = config.team_name || defaultConfig.team_name;
+      const backgroundColor = config.background_color || defaultConfig.background_color;
+      const surfaceColor = config.surface_color || defaultConfig.surface_color;
+      const textColor = config.text_color || defaultConfig.text_color;
+      const primaryColor = config.primary_action_color || defaultConfig.primary_action_color;
+      const secondaryColor = config.secondary_action_color || defaultConfig.secondary_action_color;
+
+      document.body.style.backgroundColor = backgroundColor;
+      
+      const teamNameInput = document.getElementById('team-name-input');
+      if (teamNameInput) {
+        teamNameInput.value = teamName;
+        teamNameInput.style.color = textColor;
+      }
+
+      const formContainer = document.getElementById('form-container');
+      if (formContainer) {
+        formContainer.style.backgroundColor = surfaceColor;
+      }
+
+      const statsContainer = document.getElementById('stats-container');
+      if (statsContainer) {
+        statsContainer.style.backgroundColor = surfaceColor;
+      }
+
+      const labels = document.querySelectorAll('.stat-label');
+      labels.forEach(label => {
+        label.style.color = textColor;
+      });
+
+      const inputs = document.querySelectorAll('.stat-input');
+      inputs.forEach(input => {
+        input.style.backgroundColor = backgroundColor;
+        input.style.color = textColor;
+        input.style.borderColor = secondaryColor;
+      });
+
+      const submitButton = document.getElementById('submit-button');
+      if (submitButton) {
+        submitButton.style.backgroundColor = primaryColor;
+        submitButton.style.color = textColor;
+      }
+
+      const gameCards = document.querySelectorAll('.game-card');
+      gameCards.forEach(card => {
+        card.style.backgroundColor = backgroundColor;
+        card.style.color = textColor;
+      });
+
+      const deleteButtons = document.querySelectorAll('.delete-button');
+      deleteButtons.forEach(button => {
+        button.style.backgroundColor = secondaryColor;
+        button.style.color = textColor;
+      });
+    }
+
+    function renderApp() {
+      const config = window.elementSdk?.config || defaultConfig;
+      const playerName = config.player_name || defaultConfig.player_name;
+      const teamName = config.team_name || defaultConfig.team_name;
+      const backgroundColor = config.background_color || defaultConfig.background_color;
+      const surfaceColor = config.surface_color || defaultConfig.surface_color;
+      const textColor = config.text_color || defaultConfig.text_color;
+      const primaryColor = config.primary_action_color || defaultConfig.primary_action_color;
+      const secondaryColor = config.secondary_action_color || defaultConfig.secondary_action_color;
+
+      const app = document.getElementById('app');
+      app.innerHTML = `
+        <div class="max-w-6xl mx-auto">
+
+          <div id="form-container" class="rounded-2xl shadow-2xl p-8 mb-10 border border-opacity-20" style="background: linear-gradient(135deg, ${surfaceColor} 0%, ${backgroundColor} 100%); border-color: ${primaryColor};">
+
+            <!-- Live Stats Tracking -->
+            <div class="mb-10 p-8 rounded-2xl shadow-2xl border border-opacity-20" style="background: linear-gradient(135deg, ${backgroundColor} 0%, ${surfaceColor} 100%); border-color: ${primaryColor};">
+              <div class="flex justify-between items-center mb-8">
+                <h3 class="text-2xl font-bold tracking-wide" style="color: ${textColor};">🏀 Live Game Tracking</h3>
+                <div class="flex gap-3 items-center">
+                  <div id="network-status" class="px-3 py-2 rounded-lg text-sm font-bold text-white" style="background-color: #10b981;">
+                    🌐 Online
+                  </div>
+                  <button type="button" id="undo-button" class="px-6 py-3 rounded-xl font-bold text-base tracking-wide shadow-lg transition-all duration-200 hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed" style="background-color: #ef4444; color: white;" disabled>
+                    UNDO
+                  </button>
+                </div>
+              </div>
+              
+              <!-- Game Format and Period Controls -->
+              <div class="mb-8 p-6 rounded-xl border border-opacity-20" style="background-color: rgba(0,0,0,0.2); border-color: ${primaryColor};">
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4 items-center">
+                  <div>
+                    <label class="block mb-2 font-semibold text-sm" style="color: ${textColor};">Game Format</label>
+                    <select id="game-format-select" class="w-full px-4 py-3 rounded-lg font-bold text-base shadow-md" style="background-color: ${backgroundColor}; color: ${textColor}; border: 2px solid ${primaryColor};">
+                      <option value="4quarters">4 Quarters</option>
+                      <option value="2halves">2 Halves</option>
+                    </select>
+                  </div>
+                  <div class="text-center">
+                    <div class="mb-2 font-semibold text-sm" style="color: ${textColor};">Current Period</div>
+                    <div class="text-3xl font-black" style="color: ${primaryColor};" id="current-period-display">Q1</div>
+                  </div>
+                  <div class="flex gap-2">
+                    <button type="button" id="prev-period-btn" class="flex-1 py-3 px-4 rounded-lg font-bold text-base shadow-md transition-all duration-200 hover:scale-105 disabled:opacity-50" style="background-color: ${secondaryColor}; color: ${textColor};">
+                      ← PREV
+                    </button>
+                    <button type="button" id="next-period-btn" class="flex-1 py-3 px-4 rounded-lg font-bold text-base shadow-md transition-all duration-200 hover:scale-105 disabled:opacity-50" style="background-color: ${primaryColor}; color: #521f4f;">
+                      NEXT →
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Period Stats Display -->
+              <div id="period-stats-display" class="mb-8"></div>
+              
+              <!-- Scoring Section -->
+              <div class="mb-8">
+                <h4 class="text-lg font-semibold mb-4 opacity-90" style="color: ${textColor};">🎯 Scoring</h4>
+                <div class="grid grid-cols-2 md:grid-cols-3 gap-4">
+                  <!-- 2-Pointers -->
+                  <div class="bg-black bg-opacity-20 p-4 rounded-xl">
+                    <div class="text-center mb-3">
+                      <span class="text-sm font-medium opacity-80" style="color: ${textColor};">2-Pointers</span>
+                    </div>
+                    <div class="flex gap-2">
+                      <button type="button" class="stat-button flex-1 py-3 rounded-lg font-bold text-base shadow-md transition-all duration-200 hover:scale-105" data-stat="field_goals_made" data-value="1" data-points="2" style="background-color: ${primaryColor}; color: #521f4f;">
+                        MADE
+                      </button>
+                      <button type="button" class="stat-button flex-1 py-3 rounded-lg font-bold text-base shadow-md transition-all duration-200 hover:scale-105" data-stat="field_goals_attempted" data-value="1" style="background-color: ${secondaryColor}; color: ${textColor};">
+                        MISS
+                      </button>
+                    </div>
+                  </div>
+                  
+                  <!-- 3-Pointers -->
+                  <div class="bg-black bg-opacity-20 p-4 rounded-xl">
+                    <div class="text-center mb-3">
+                      <span class="text-sm font-medium opacity-80" style="color: ${textColor};">3-Pointers</span>
+                    </div>
+                    <div class="flex gap-2">
+                      <button type="button" class="stat-button flex-1 py-3 rounded-lg font-bold text-base shadow-md transition-all duration-200 hover:scale-105" data-stat="three_pointers_made" data-value="1" data-points="3" style="background-color: ${primaryColor}; color: #521f4f;">
+                        MADE
+                      </button>
+                      <button type="button" class="stat-button flex-1 py-3 rounded-lg font-bold text-base shadow-md transition-all duration-200 hover:scale-105" data-stat="three_pointers_attempted" data-value="1" style="background-color: ${secondaryColor}; color: ${textColor};">
+                        MISS
+                      </button>
+                    </div>
+                  </div>
+                  
+                  <!-- Free Throws -->
+                  <div class="bg-black bg-opacity-20 p-4 rounded-xl">
+                    <div class="text-center mb-3">
+                      <span class="text-sm font-medium opacity-80" style="color: ${textColor};">Free Throws</span>
+                    </div>
+                    <div class="flex gap-2">
+                      <button type="button" class="stat-button flex-1 py-3 rounded-lg font-bold text-base shadow-md transition-all duration-200 hover:scale-105" data-stat="free_throws_made" data-value="1" data-points="1" style="background-color: ${primaryColor}; color: #521f4f;">
+                        MADE
+                      </button>
+                      <button type="button" class="stat-button flex-1 py-3 rounded-lg font-bold text-base shadow-md transition-all duration-200 hover:scale-105" data-stat="free_throws_attempted" data-value="1" style="background-color: ${secondaryColor}; color: ${textColor};">
+                        MISS
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              
+              <!-- Other Stats Section -->
+              <div class="mb-8">
+                <h4 class="text-lg font-semibold mb-4 opacity-90" style="color: ${textColor};">📊 Other Stats</h4>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <button type="button" class="stat-button py-4 px-4 rounded-xl font-bold text-base shadow-md transition-all duration-200 hover:scale-105" data-stat="rebounds" data-value="1" style="background-color: ${primaryColor}; color: #521f4f;">
+                    REBOUND
+                  </button>
+                  <button type="button" class="stat-button py-4 px-4 rounded-xl font-bold text-base shadow-md transition-all duration-200 hover:scale-105" data-stat="assists" data-value="1" style="background-color: ${primaryColor}; color: #521f4f;">
+                    ASSIST
+                  </button>
+                  <button type="button" class="stat-button py-4 px-4 rounded-xl font-bold text-base shadow-md transition-all duration-200 hover:scale-105" data-stat="steals" data-value="1" style="background-color: ${primaryColor}; color: #521f4f;">
+                    STEAL
+                  </button>
+                  <button type="button" class="stat-button py-4 px-4 rounded-xl font-bold text-base shadow-md transition-all duration-200 hover:scale-105" data-stat="blocks" data-value="1" style="background-color: ${primaryColor}; color: #521f4f;">
+                    BLOCK
+                  </button>
+                  <button type="button" class="stat-button py-4 px-4 rounded-xl font-bold text-base shadow-md transition-all duration-200 hover:scale-105" data-stat="turnovers" data-value="1" style="background-color: ${primaryColor}; color: #521f4f;">
+                    TURNOVER
+                  </button>
+                  <button type="button" class="stat-button py-4 px-4 rounded-xl font-bold text-base shadow-md transition-all duration-200 hover:scale-105" data-stat="fouls" data-value="1" style="background-color: ${primaryColor}; color: #521f4f;">
+                    FOUL
+                  </button>
+                </div>
+              </div>
+              
+              <div id="current-stats" class="text-center p-6 rounded-2xl shadow-inner border border-opacity-10" style="background-color: rgba(0,0,0,0.3); color: ${textColor}; border-color: ${primaryColor};">
+                <div class="text-xl font-bold mb-4 tracking-wide">📈 Current Game Stats</div>
+                <div class="grid grid-cols-2 md:grid-cols-5 gap-4 text-base font-semibold">
+                  <div class="bg-black bg-opacity-30 p-3 rounded-lg">
+                    <div class="text-2xl font-black" style="color: ${primaryColor};" id="live-points">0</div>
+                    <div class="text-xs opacity-80">POINTS</div>
+                  </div>
+                  <div class="bg-black bg-opacity-30 p-3 rounded-lg">
+                    <div class="text-2xl font-black" style="color: ${primaryColor};" id="live-rebounds">0</div>
+                    <div class="text-xs opacity-80">REBOUNDS</div>
+                  </div>
+                  <div class="bg-black bg-opacity-30 p-3 rounded-lg">
+                    <div class="text-2xl font-black" style="color: ${primaryColor};" id="live-assists">0</div>
+                    <div class="text-xs opacity-80">ASSISTS</div>
+                  </div>
+                  <div class="bg-black bg-opacity-30 p-3 rounded-lg">
+                    <div class="text-2xl font-black" style="color: ${primaryColor};" id="live-steals">0</div>
+                    <div class="text-xs opacity-80">STEALS</div>
+                  </div>
+                  <div class="bg-black bg-opacity-30 p-3 rounded-lg">
+                    <div class="text-2xl font-black" style="color: ${primaryColor};" id="live-blocks">0</div>
+                    <div class="text-xs opacity-80">BLOCKS</div>
+                  </div>
+                </div>
+                <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mt-4 text-sm">
+                  <div>TO: <span id="live-turnovers">0</span></div>
+                  <div>FOULS: <span id="live-fouls">0</span></div>
+                  <div>FG: <span id="live-field_goals_made">0</span>/<span id="live-field_goals_attempted">0</span></div>
+                  <div>3PT: <span id="live-three_pointers_made">0</span>/<span id="live-three_pointers_attempted">0</span></div>
+                  <div>FT: <span id="live-free_throws_made">0</span>/<span id="live-free_throws_attempted">0</span></div>
+                </div>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4 text-sm font-semibold">
+                  <div class="bg-black bg-opacity-30 p-2 rounded-lg text-center">
+                    <div class="text-lg font-bold" style="color: ${primaryColor};" id="live-overall-fg-percentage">0%</div>
+                    <div class="text-xs opacity-80">OVERALL FG%</div>
+                  </div>
+                  <div class="bg-black bg-opacity-30 p-2 rounded-lg text-center">
+                    <div class="text-lg font-bold" style="color: ${primaryColor};" id="live-fg-percentage">0%</div>
+                    <div class="text-xs opacity-80">2PT%</div>
+                  </div>
+                  <div class="bg-black bg-opacity-30 p-2 rounded-lg text-center">
+                    <div class="text-lg font-bold" style="color: ${primaryColor};" id="live-3pt-percentage">0%</div>
+                    <div class="text-xs opacity-80">3PT%</div>
+                  </div>
+                  <div class="bg-black bg-opacity-30 p-2 rounded-lg text-center">
+                    <div class="text-lg font-bold" style="color: ${primaryColor};" id="live-ft-percentage">0%</div>
+                    <div class="text-xs opacity-80">FT%</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <form id="stats-form">
+              <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
+                <div class="flex flex-col">
+                  <label class="stat-label block mb-3 font-bold text-sm tracking-wide opacity-90" style="color: ${textColor};">📅 Game Date</label>
+                  <input type="date" id="game_date" required class="stat-input flex-1 w-full px-6 py-4 rounded-xl border-2 shadow-md transition-all duration-200 focus:scale-105 focus:shadow-lg" style="background-color: ${backgroundColor}; color: ${textColor}; border-color: ${primaryColor};">
+                </div>
+                <div class="flex flex-col">
+                  <label class="stat-label block mb-3 font-bold text-sm tracking-wide opacity-90" style="color: ${textColor};">🏠 Home Team</label>
+                  <input list="home-team-list" id="home_team" required class="stat-input flex-1 w-full px-6 py-4 rounded-xl border-2 shadow-md transition-all duration-200 focus:scale-105 focus:shadow-lg" placeholder="Select or type home team..." value="MVA - Varsity Purple" style="background-color: ${backgroundColor}; color: ${textColor}; border-color: ${primaryColor};">
+                  <datalist id="home-team-list">
+                    <option value="MVA - Varsity Purple"></option>
+                    <option value="212 Sports Academy"></option>
+                    <option value="Academy of Central Florida"></option>
+                    <option value="BCAT"></option>
+                    <option value="Central Pointe"></option>
+                    <option value="Cornerstone Charter Academy"></option>
+                    <option value="DME"></option>
+                    <option value="IMG"></option>
+                    <option value="Jordan Christian Prep"></option>
+                    <option value="Lake Minneola"></option>
+                    <option value="Lake Wales"></option>
+                    <option value="Life Christian Academy"></option>
+                    <option value="Nazaret Christian"></option>
+                    <option value="Poinciana"></option>
+                    <option value="Prolific Prep"></option>
+                    <option value="Southeastern Prep"></option>
+                    <option value="Southland Christian"></option>
+                  </datalist>
+                </div>
+                <div class="flex flex-col">
+                  <label class="stat-label block mb-3 font-bold text-sm tracking-wide opacity-90" style="color: ${textColor};">✈️ Away Team</label>
+                  <input list="away-team-list" id="away_team" required class="stat-input flex-1 w-full px-6 py-4 rounded-xl border-2 shadow-md transition-all duration-200 focus:scale-105 focus:shadow-lg" placeholder="Select or type away team..." style="background-color: ${backgroundColor}; color: ${textColor}; border-color: ${primaryColor};">
+                  <datalist id="away-team-list">
+                    <option value="MVA - Varsity Purple"></option>
+                    <option value="212 Sports Academy"></option>
+                    <option value="Academy of Central Florida"></option>
+                    <option value="BCAT"></option>
+                    <option value="Central Pointe"></option>
+                    <option value="Cornerstone Charter Academy"></option>
+                    <option value="DME"></option>
+                    <option value="IMG"></option>
+                    <option value="Jordan Christian Prep"></option>
+                    <option value="Lake Minneola"></option>
+                    <option value="Lake Wales"></option>
+                    <option value="Life Christian Academy"></option>
+                    <option value="Nazaret Christian"></option>
+                    <option value="Poinciana"></option>
+                    <option value="Prolific Prep"></option>
+                    <option value="Southeastern Prep"></option>
+                    <option value="Southland Christian"></option>
+                  </datalist>
+                </div>
+              </div>
+
+              <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
+                <div class="flex flex-col">
+                  <label class="stat-label block mb-3 font-bold text-sm tracking-wide opacity-90" style="color: ${textColor};">🏆 Game Result</label>
+                  <select id="result" required class="stat-input flex-1 w-full px-6 py-4 rounded-xl border-2 shadow-md transition-all duration-200 focus:scale-105 focus:shadow-lg" style="background-color: ${backgroundColor}; color: ${textColor}; border-color: ${primaryColor};">
+                    <option value="Win">🏆 Win</option>
+                    <option value="Loss">😤 Loss</option>
+                  </select>
+                </div>
+                <div class="flex flex-col">
+                  <label class="stat-label block mb-3 font-bold text-sm tracking-wide opacity-90" style="color: ${textColor};">📊 Final Score</label>
+                  <input type="text" id="final_score" class="stat-input flex-1 w-full px-6 py-4 rounded-xl border-2 shadow-md transition-all duration-200 focus:scale-105 focus:shadow-lg" placeholder="Add Final Score" style="background-color: ${backgroundColor}; color: ${textColor}; border-color: ${primaryColor};">
+                </div>
+                <div class="flex flex-col">
+                  <label class="stat-label block mb-3 font-bold text-sm tracking-wide opacity-90" style="color: ${textColor};">⏱️ Minutes Played</label>
+                  <input type="number" id="minutes_played" min="0" value="0" required class="stat-input flex-1 w-full px-6 py-4 rounded-xl border-2 shadow-md transition-all duration-200 focus:scale-105 focus:shadow-lg" style="background-color: ${backgroundColor}; color: ${textColor}; border-color: ${primaryColor};">
+                </div>
+              </div>
+
+              <!-- Hidden inputs for stats (populated by live tracking) -->
+              <div class="hidden">
+                <input type="number" id="points" min="0" value="0" required>
+                <input type="number" id="field_goals_made" min="0" value="0" required>
+                <input type="number" id="field_goals_attempted" min="0" value="0" required>
+                <input type="number" id="three_pointers_made" min="0" value="0" required>
+                <input type="number" id="three_pointers_attempted" min="0" value="0" required>
+                <input type="number" id="free_throws_made" min="0" value="0" required>
+                <input type="number" id="free_throws_attempted" min="0" value="0" required>
+                <input type="number" id="rebounds" min="0" value="0" required>
+                <input type="number" id="assists" min="0" value="0" required>
+                <input type="number" id="steals" min="0" value="0" required>
+                <input type="number" id="blocks" min="0" value="0" required>
+                <input type="number" id="turnovers" min="0" value="0" required>
+                <input type="number" id="fouls" min="0" value="0" required>
+                <input type="text" id="game_format" value="4quarters">
+                <input type="text" id="period_stats" value="">
+              </div>
+
+              <div class="mb-8">
+                <label class="stat-label block mb-3 font-bold text-sm tracking-wide opacity-90" style="color: ${textColor};">📝 Notes (Optional)</label>
+                <textarea id="notes" rows="4" class="stat-input w-full px-6 py-4 rounded-xl border-2 shadow-md transition-all duration-200 focus:scale-105 focus:shadow-lg" placeholder="Game highlights, observations, key plays..." style="background-color: ${backgroundColor}; color: ${textColor}; border-color: ${primaryColor};"></textarea>
+              </div>
+
+              <button type="submit" id="submit-button" class="w-full py-5 px-8 rounded-2xl font-black text-xl tracking-wide shadow-2xl transition-all duration-300 hover:scale-105 hover:shadow-3xl" style="background: linear-gradient(135deg, ${primaryColor} 0%, #ffd700 100%); color: #521f4f;">
+                Submit Game Stats
+              </button>
+            </form>
+          </div>
+
+          <div id="stats-container" class="rounded-2xl shadow-2xl p-8 border border-opacity-20" style="background: linear-gradient(135deg, ${surfaceColor} 0%, ${backgroundColor} 100%); border-color: ${primaryColor};">
+            <div class="flex justify-between items-center mb-8">
+              <h2 class="text-3xl font-black tracking-wide" style="color: ${textColor};">📊 Game History</h2>
+            </div>
+            <div id="games-list"></div>
+          </div>
+        </div>
+      `;
+
+      const form = document.getElementById('stats-form');
+      form.addEventListener('submit', handleSubmit);
+
+      // Add event listeners for stat buttons
+      const statButtons = document.querySelectorAll('.stat-button');
+      statButtons.forEach(button => {
+        button.addEventListener('click', handleStatButtonClick);
+      });
+
+      // Add event listener for undo button
+      const undoButton = document.getElementById('undo-button');
+      undoButton.addEventListener('click', handleUndo);
+
+      // Add event listeners for period controls
+      const gameFormatSelect = document.getElementById('game-format-select');
+      gameFormatSelect.addEventListener('change', (e) => {
+        changeGameFormat(e.target.value);
+      });
+
+      const prevPeriodBtn = document.getElementById('prev-period-btn');
+      prevPeriodBtn.addEventListener('click', () => changePeriod('prev'));
+
+      const nextPeriodBtn = document.getElementById('next-period-btn');
+      nextPeriodBtn.addEventListener('click', () => changePeriod('next'));
+
+      // Initialize period stats
+      initializePeriodStats();
+      updatePeriodDisplay();
+      updatePeriodStatsDisplay();
+      updateLiveStatsDisplay();
+      renderStats();
+    }
+
+    function renderStats() {
+      const config = window.elementSdk?.config || defaultConfig;
+      const backgroundColor = config.background_color || defaultConfig.background_color;
+      const textColor = config.text_color || defaultConfig.text_color;
+      const primaryColor = config.primary_action_color || defaultConfig.primary_action_color;
+      const secondaryColor = config.secondary_action_color || defaultConfig.secondary_action_color;
+
+      const gamesList = document.getElementById('games-list');
+      if (!gamesList) return;
+
+      if (allGames.length === 0) {
+        gamesList.innerHTML = `<p style="color: ${textColor}; opacity: 0.7;">No games recorded yet. Submit your first game above!</p>`;
+        return;
+      }
+
+      const sortedGames = [...allGames].sort((a, b) => new Date(b.game_date) - new Date(a.game_date));
+
+      gamesList.innerHTML = sortedGames.map(game => {
+        const gameDate = new Date(game.game_date);
+        const formattedDate = gameDate.toLocaleDateString('en-US', { 
+          month: 'short', 
+          day: 'numeric', 
+          year: 'numeric' 
+        });
+        
+        // Parse period stats if available
+        let periodStatsHtml = '';
+        if (game.period_stats) {
+          try {
+            const periods = JSON.parse(game.period_stats);
+            const gameFormat = game.game_format || '4quarters';
+            const periodLabel = gameFormat === '4quarters' ? 'Q' : 'H';
+            const maxPeriods = gameFormat === '4quarters' ? 4 : 2;
+            
+            periodStatsHtml = `
+              <div class="mt-4 p-4 rounded-lg" style="background-color: rgba(0,0,0,0.2);">
+                <h4 class="font-semibold mb-3" style="color: ${textColor};">Period Breakdown:</h4>
+                <div class="grid grid-cols-${maxPeriods} gap-3 text-sm">
+            `;
+            
+            for (let i = 1; i <= maxPeriods; i++) {
+              const stats = periods[i] || {};
+              periodStatsHtml += `
+                <div class="text-center p-2 rounded" style="background-color: rgba(0,0,0,0.3);">
+                  <div class="font-bold" style="color: ${primaryColor};">${periodLabel}${i}</div>
+                  <div class="text-lg font-bold" style="color: ${primaryColor};">${stats.points || 0}</div>
+                  <div class="text-xs opacity-70">PTS</div>
+                  <div class="text-xs mt-1 opacity-70">
+                    ${stats.rebounds || 0}R ${stats.assists || 0}A
+                  </div>
+                </div>
+              `;
+            }
+            
+            periodStatsHtml += `
+                </div>
+              </div>
+            `;
+          } catch (e) {
+            // If parsing fails, don't show period stats
+          }
+        }
+        
+        return `
+        <div class="game-card mb-6 p-6 rounded-lg" style="background-color: ${backgroundColor}; color: ${textColor};">
+          <div class="flex justify-between items-start mb-4">
+            <div class="flex-1">
+              <h3 class="text-xl font-bold mb-2">${formattedDate}: ${game.home_team} vs ${game.away_team}</h3>
+              <p class="text-base opacity-90 mb-2">${game.home_team} | ${game.away_team}</p>
+              ${game.final_score ? `<p class="text-base font-semibold mb-2">Final Score: ${game.final_score}</p>` : ''}
+              <span class="inline-block px-3 py-1 rounded text-sm font-semibold" style="background-color: ${game.result === 'Win' ? '#10b981' : '#ef4444'}; color: white;">
+                ${game.result}
+              </span>
+            </div>
+            <div class="flex gap-2">
+              <button onclick="shareGame('${game.__backendId}')" class="px-4 py-2 rounded font-semibold hover:opacity-80 transition-all duration-200" style="background-color: #10b981; color: white;">
+                SHARE RECAP
+              </button>
+              <button onclick="deleteGame('${game.__backendId}')" class="delete-button px-4 py-2 rounded font-semibold hover:opacity-80" style="background-color: #ef4444; color: white;">
+                DELETE
+              </button>
+            </div>
+          </div>
+          
+          ${periodStatsHtml}
+          
+          <div class="mt-4 space-y-3">
+            <div class="text-base">
+              <strong>Overall FG%:</strong> ${game.overall_fg_percentage}%
+            </div>
+            <div class="text-base">
+              <strong>Total Points:</strong> ${game.points}
+            </div>
+            <div class="text-base">
+              <strong>2-Pointers Total:</strong> ${game.field_goals_made}/${game.field_goals_attempted}
+            </div>
+            <div class="text-base">
+              <strong>3-Pointers Total:</strong> ${game.three_pointers_made}/${game.three_pointers_attempted}
+            </div>
+            <div class="text-base">
+              <strong>Rebounds:</strong> ${game.rebounds} <strong>Assists:</strong> ${game.assists} <strong>Steals:</strong> ${game.steals}
+            </div>
+            <div class="text-base">
+              <strong>Blocks:</strong> ${game.blocks} <strong>Turnovers:</strong> ${game.turnovers} <strong>Fouls:</strong> ${game.fouls}
+            </div>
+          </div>
+          
+          ${game.notes ? `<p class="mt-4 italic text-base" style="opacity: 0.8;">${game.notes}</p>` : ''}
+        </div>
+      `;
+      }).join('');
+    }
+
+    function generateESPNRecap(game) {
+      const config = window.elementSdk?.config || defaultConfig;
+      const playerName = config.player_name || defaultConfig.player_name;
+      
+      const gameDate = new Date(game.game_date);
+      const formattedDate = gameDate.toLocaleDateString('en-US', { 
+        weekday: 'long',
+        month: 'long', 
+        day: 'numeric', 
+        year: 'numeric' 
+      });
+      
+      // Performance analysis
+      let keyHighlight = "";
+      
+      if (game.points >= 20) {
+        keyHighlight = `${playerName} exploded for ${game.points} points in an offensive showcase`;
+      } else if (game.points >= 15) {
+        keyHighlight = `${playerName} delivered a strong ${game.points}-point performance`;
+      } else if (game.points >= 10) {
+        keyHighlight = `${playerName} contributed ${game.points} points in a steady effort`;
+      } else {
+        keyHighlight = `${playerName} focused on facilitating and defense with ${game.assists} assists`;
+      }
+      
+      // Shooting analysis
+      let shootingAnalysis = "";
+      if (game.overall_fg_percentage >= 60) {
+        shootingAnalysis = "with exceptional shooting efficiency";
+      } else if (game.overall_fg_percentage >= 45) {
+        shootingAnalysis = "shooting efficiently from the field";
+      } else if (game.overall_fg_percentage >= 35) {
+        shootingAnalysis = "battling through tough shooting conditions";
+      } else {
+        shootingAnalysis = "struggling to find rhythm offensively";
+      }
+      
+      // Impact plays
+      let impactPlays = [];
+      if (game.steals >= 3) impactPlays.push(`${game.steals} steals`);
+      if (game.blocks >= 2) impactPlays.push(`${game.blocks} blocks`);
+      if (game.assists >= 5) impactPlays.push(`${game.assists} assists`);
+      if (game.rebounds >= 8) impactPlays.push(`${game.rebounds} rebounds`);
+      
+      const impactText = impactPlays.length > 0 ? 
+        `, adding ${impactPlays.join(', ')} to stuff the stat sheet` : 
+        ` while contributing across multiple categories`;
+      
+      // Game context
+      const gameResult = game.result === 'Win' ? 
+        `helped secure the victory` : 
+        `fought hard in the loss`;
+      
+      // Period breakdown if available
+      let periodBreakdown = '';
+      if (game.period_stats) {
+        try {
+          const periods = JSON.parse(game.period_stats);
+          const gameFormat = game.game_format || '4quarters';
+          const periodLabel = gameFormat === '4quarters' ? 'Q' : 'H';
+          const maxPeriods = gameFormat === '4quarters' ? 4 : 2;
+          
+          periodBreakdown = `\n\nPERIOD-BY-PERIOD BREAKDOWN:\n`;
+          for (let i = 1; i <= maxPeriods; i++) {
+            const stats = periods[i] || {};
+            periodBreakdown += `${periodLabel}${i}: ${stats.points || 0} PTS, ${stats.rebounds || 0} REB, ${stats.assists || 0} AST\n`;
+          }
+        } catch (e) {
+          // If parsing fails, don't include period breakdown
+        }
+      }
+      
+      const recap = `🏀 GAME RECAP - ${formattedDate}
+
+${game.home_team} vs ${game.away_team}
+${game.final_score ? `Final Score: ${game.final_score}` : 'Final Score: Not Available'}
+
+📊 ${playerName.toUpperCase()} PERFORMANCE BREAKDOWN
+
+${keyHighlight} ${shootingAnalysis} and ${gameResult}${impactText}.
+
+STATISTICAL SUMMARY:
+• Points: ${game.points}
+• Field Goals: ${game.field_goals_made}/${game.field_goals_attempted} (${game.overall_fg_percentage}%)
+• 3-Pointers: ${game.three_pointers_made}/${game.three_pointers_attempted}
+• Free Throws: ${game.free_throws_made}/${game.free_throws_attempted}
+• Rebounds: ${game.rebounds}
+• Assists: ${game.assists}
+• Steals: ${game.steals}
+• Blocks: ${game.blocks}
+• Turnovers: ${game.turnovers}
+• Fouls: ${game.fouls}
+• Minutes: ${game.minutes_played}
+
+SHOOTING BREAKDOWN:
+• Overall FG%: ${game.overall_fg_percentage}%
+• 2-Point FG%: ${game.two_point_percentage}%
+• 3-Point FG%: ${game.three_point_percentage}%
+• Free Throw%: ${game.free_throw_percentage}%${periodBreakdown}
+
+${game.notes ? `GAME NOTES: ${game.notes}` : ''}
+
+Generated by Basketball Stats Tracker`;
+      
+      return recap;
+    }
+
+    async function shareGame(backendId) {
+      const game = allGames.find(g => g.__backendId === backendId);
+      if (!game) return;
+      
+      const recap = generateESPNRecap(game);
+      
+      // Create modal overlay
+      const modal = document.createElement('div');
+      modal.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(0, 0, 0, 0.8);
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        z-index: 1000;
+        padding: 20px;
+        box-sizing: border-box;
+      `;
+      
+      const config = window.elementSdk?.config || defaultConfig;
+      const backgroundColor = config.background_color || defaultConfig.background_color;
+      const textColor = config.text_color || defaultConfig.text_color;
+      const primaryColor = config.primary_action_color || defaultConfig.primary_action_color;
+      
+      modal.innerHTML = `
+        <div style="
+          background-color: ${backgroundColor};
+          color: ${textColor};
+          padding: 30px;
+          border-radius: 15px;
+          max-width: 600px;
+          width: 100%;
+          max-height: 80%;
+          overflow-y: auto;
+          box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+        ">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+            <h2 style="margin: 0; font-size: 24px; font-weight: bold;">ESPN-Style Game Recap</h2>
+            <button onclick="this.closest('.modal-overlay').remove()" style="
+              background: none;
+              border: none;
+              font-size: 24px;
+              color: ${textColor};
+              cursor: pointer;
+              padding: 5px;
+            ">✕</button>
+          </div>
+          
+          <textarea readonly style="
+            width: 100%;
+            height: 400px;
+            padding: 15px;
+            border: 2px solid ${primaryColor};
+            border-radius: 10px;
+            background-color: rgba(0,0,0,0.2);
+            color: ${textColor};
+            font-family: monospace;
+            font-size: 14px;
+            line-height: 1.4;
+            resize: none;
+            box-sizing: border-box;
+          ">${recap}</textarea>
+          
+          <div style="display: flex; gap: 10px; margin-top: 20px;">
+            <button onclick="copyToClipboard(this)" data-text="${recap.replace(/"/g, '&quot;')}" style="
+              flex: 1;
+              padding: 12px 20px;
+              background-color: ${primaryColor};
+              color: #521f4f;
+              border: none;
+              border-radius: 8px;
+              font-weight: bold;
+              cursor: pointer;
+              transition: all 0.2s;
+            " onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'">
+              📋 COPY TO CLIPBOARD
+            </button>
+            <button onclick="openInNewWindow(this)" data-text="${recap.replace(/"/g, '&quot;')}" style="
+              flex: 1;
+              padding: 12px 20px;
+              background-color: #10b981;
+              color: white;
+              border: none;
+              border-radius: 8px;
+              font-weight: bold;
+              cursor: pointer;
+              transition: all 0.2s;
+            " onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'">
+              🔗 OPEN IN NEW TAB
+            </button>
+          </div>
+        </div>
+      `;
+      
+      modal.className = 'modal-overlay';
+      document.body.appendChild(modal);
+      
+      // Close modal when clicking outside
+      modal.addEventListener('click', (e) => {
+        if (e.target === modal) {
+          modal.remove();
+        }
+      });
+    }
+
+    function copyToClipboard(button) {
+      const text = button.dataset.text.replace(/&quot;/g, '"');
+      
+      // Try multiple clipboard methods for better compatibility
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => {
+          showCopySuccess(button);
+        }).catch(() => {
+          fallbackCopyToClipboard(text, button);
+        });
+      } else {
+        fallbackCopyToClipboard(text, button);
+      }
+    }
+
+    function fallbackCopyToClipboard(text, button) {
+      // Create a temporary textarea element
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-999999px';
+      textarea.style.top = '-999999px';
+      document.body.appendChild(textarea);
+      
+      try {
+        textarea.focus();
+        textarea.select();
+        const successful = document.execCommand('copy');
+        if (successful) {
+          showCopySuccess(button);
+        } else {
+          showMessage('Copy failed - please select and copy the text manually', true);
+        }
+      } catch (err) {
+        showMessage('Copy failed - please select and copy the text manually', true);
+      } finally {
+        document.body.removeChild(textarea);
+      }
+    }
+
+    function showCopySuccess(button) {
+      const originalText = button.textContent;
+      const originalBg = button.style.backgroundColor;
+      button.textContent = '✅ COPIED!';
+      button.style.backgroundColor = '#10b981';
+      showMessage('Game recap copied to clipboard!', false);
+      
+      setTimeout(() => {
+        button.textContent = originalText;
+        button.style.backgroundColor = originalBg;
+      }, 2000);
+    }
+
+    function openInNewWindow(button) {
+      const text = button.dataset.text.replace(/&quot;/g, '"');
+      const newWindow = window.open('', '_blank', 'width=800,height=600');
+      newWindow.document.write(`
+        <html>
+          <head>
+            <title>Game Recap</title>
+            <style>
+              body { 
+                font-family: Arial, sans-serif; 
+                padding: 20px; 
+                background: #f5f5f5; 
+                line-height: 1.6;
+              }
+              .recap { 
+                background: white; 
+                padding: 30px; 
+                border-radius: 10px; 
+                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                white-space: pre-wrap;
+                font-family: monospace;
+              }
+            </style>
+          </head>
+          <body>
+            <div class="recap">${text}</div>
+          </body>
+        </html>
+      `);
+      newWindow.document.close();
+    }
+
+    function handleStatButtonClick(e) {
+      const stat = e.target.dataset.stat;
+      const value = parseInt(e.target.dataset.value);
+      const points = parseInt(e.target.dataset.points) || 0;
+      
+      // Save current state for undo
+      const undoAction = {
+        stat: stat,
+        value: value,
+        previousValue: liveStats[stat],
+        period: currentPeriod
+      };
+      
+      // If this is a made shot, also track points and attempts
+      if (points > 0) {
+        undoAction.points = points;
+        undoAction.previousPoints = liveStats.points;
+        
+        // Also increment attempts for made shots
+        if (stat === 'field_goals_made') {
+          undoAction.attemptStat = 'field_goals_attempted';
+          undoAction.previousAttemptValue = liveStats.field_goals_attempted;
+          liveStats.field_goals_attempted += 1;
+          
+          // Update period stats
+          if (!periodStats[currentPeriod]) periodStats[currentPeriod] = {};
+          periodStats[currentPeriod].field_goals_attempted = (periodStats[currentPeriod].field_goals_attempted || 0) + 1;
+        } else if (stat === 'three_pointers_made') {
+          undoAction.attemptStat = 'three_pointers_attempted';
+          undoAction.previousAttemptValue = liveStats.three_pointers_attempted;
+          liveStats.three_pointers_attempted += 1;
+          
+          // Update period stats
+          if (!periodStats[currentPeriod]) periodStats[currentPeriod] = {};
+          periodStats[currentPeriod].three_pointers_attempted = (periodStats[currentPeriod].three_pointers_attempted || 0) + 1;
+        } else if (stat === 'free_throws_made') {
+          undoAction.attemptStat = 'free_throws_attempted';
+          undoAction.previousAttemptValue = liveStats.free_throws_attempted;
+          liveStats.free_throws_attempted += 1;
+          
+          // Update period stats
+          if (!periodStats[currentPeriod]) periodStats[currentPeriod] = {};
+          periodStats[currentPeriod].free_throws_attempted = (periodStats[currentPeriod].free_throws_attempted || 0) + 1;
+        }
+        
+        liveStats.points += points;
+        
+        // Update period stats for points
+        if (!periodStats[currentPeriod]) periodStats[currentPeriod] = {};
+        periodStats[currentPeriod].points = (periodStats[currentPeriod].points || 0) + points;
+      }
+      
+      undoStack.push(undoAction);
+      
+      // Update the stat
+      liveStats[stat] += value;
+      
+      // Update period stats
+      if (!periodStats[currentPeriod]) periodStats[currentPeriod] = {};
+      periodStats[currentPeriod][stat] = (periodStats[currentPeriod][stat] || 0) + value;
+      
+      // Auto-save to local storage after every stat change
+      saveToLocalStorage();
+      
+      // Update display
+      updateLiveStatsDisplay();
+      updateFormInputs();
+      updatePeriodStatsDisplay();
+      
+      // Enable undo button
+      const undoButton = document.getElementById('undo-button');
+      undoButton.disabled = false;
+      
+      // Limit undo stack to last 20 actions
+      if (undoStack.length > 20) {
+        undoStack.shift();
+      }
+    }
+
+    function handleUndo() {
+      if (undoStack.length === 0) return;
+      
+      const lastAction = undoStack.pop();
+      liveStats[lastAction.stat] = lastAction.previousValue;
+      
+      // Undo period stats
+      if (periodStats[lastAction.period]) {
+        periodStats[lastAction.period][lastAction.stat] = Math.max(0, (periodStats[lastAction.period][lastAction.stat] || 0) - lastAction.value);
+      }
+      
+      // If this action had points, undo those too
+      if (lastAction.points) {
+        liveStats.points = lastAction.previousPoints;
+        
+        // Undo period points
+        if (periodStats[lastAction.period]) {
+          periodStats[lastAction.period].points = Math.max(0, (periodStats[lastAction.period].points || 0) - lastAction.points);
+        }
+      }
+      
+      // If this action had attempt tracking, undo that too
+      if (lastAction.attemptStat) {
+        liveStats[lastAction.attemptStat] = lastAction.previousAttemptValue;
+        
+        // Undo period attempts
+        if (periodStats[lastAction.period]) {
+          periodStats[lastAction.period][lastAction.attemptStat] = Math.max(0, (periodStats[lastAction.period][lastAction.attemptStat] || 0) - 1);
+        }
+      }
+      
+      updateLiveStatsDisplay();
+      updateFormInputs();
+      updatePeriodStatsDisplay();
+      
+      // Disable undo button if no more actions
+      if (undoStack.length === 0) {
+        const undoButton = document.getElementById('undo-button');
+        undoButton.disabled = true;
+      }
+    }
+
+    function updateLiveStatsDisplay() {
+      const stats = ['points', 'rebounds', 'assists', 'steals', 'blocks', 'turnovers', 'fouls', 'field_goals_made', 'field_goals_attempted', 'three_pointers_made', 'three_pointers_attempted', 'free_throws_made', 'free_throws_attempted'];
+      
+      stats.forEach(stat => {
+        const element = document.getElementById(`live-${stat}`);
+        if (element) {
+          element.textContent = liveStats[stat];
+        }
+      });
+
+      // Calculate and display percentages
+      const totalFieldGoalsMade = liveStats.field_goals_made + liveStats.three_pointers_made;
+      const totalFieldGoalsAttempted = liveStats.field_goals_attempted + liveStats.three_pointers_attempted;
+      
+      const overallFgPercentage = totalFieldGoalsAttempted > 0 ? 
+        Math.round((totalFieldGoalsMade / totalFieldGoalsAttempted) * 100) : 0;
+      const fgPercentage = liveStats.field_goals_attempted > 0 ? 
+        Math.round((liveStats.field_goals_made / liveStats.field_goals_attempted) * 100) : 0;
+      const threePtPercentage = liveStats.three_pointers_attempted > 0 ? 
+        Math.round((liveStats.three_pointers_made / liveStats.three_pointers_attempted) * 100) : 0;
+      const ftPercentage = liveStats.free_throws_attempted > 0 ? 
+        Math.round((liveStats.free_throws_made / liveStats.free_throws_attempted) * 100) : 0;
+
+      const overallFgPercentageElement = document.getElementById('live-overall-fg-percentage');
+      const fgPercentageElement = document.getElementById('live-fg-percentage');
+      const threePtPercentageElement = document.getElementById('live-3pt-percentage');
+      const ftPercentageElement = document.getElementById('live-ft-percentage');
+
+      if (overallFgPercentageElement) overallFgPercentageElement.textContent = `${overallFgPercentage}%`;
+      if (fgPercentageElement) fgPercentageElement.textContent = `${fgPercentage}%`;
+      if (threePtPercentageElement) threePtPercentageElement.textContent = `${threePtPercentage}%`;
+      if (ftPercentageElement) ftPercentageElement.textContent = `${ftPercentage}%`;
+    }
+
+    function updateFormInputs() {
+      // Update form inputs with live stats
+      Object.keys(liveStats).forEach(stat => {
+        const input = document.getElementById(stat);
+        if (input) {
+          input.value = liveStats[stat];
+        }
+      });
+      
+      // Update game format and period stats
+      const gameFormatInput = document.getElementById('game_format');
+      if (gameFormatInput) {
+        gameFormatInput.value = gameFormat;
+      }
+      
+      const periodStatsInput = document.getElementById('period_stats');
+      if (periodStatsInput) {
+        periodStatsInput.value = JSON.stringify(periodStats);
+      }
+    }
+
+    function resetLiveStats() {
+      Object.keys(liveStats).forEach(key => {
+        liveStats[key] = 0;
+      });
+      undoStack = [];
+      currentPeriod = 1;
+      initializePeriodStats();
+      updateLiveStatsDisplay();
+      updateFormInputs();
+      updatePeriodDisplay();
+      updatePeriodStatsDisplay();
+      
+      const undoButton = document.getElementById('undo-button');
+      undoButton.disabled = true;
+    }
+
+    function createConfetti() {
+      const colors = ['#f8d35d', '#ffd700', '#ff6b6b', '#4ecdc4', '#45b7d1', '#96ceb4', '#ffeaa7'];
+      const confettiContainer = document.createElement('div');
+      confettiContainer.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        z-index: 9999;
+        overflow: hidden;
+      `;
+      
+      document.body.appendChild(confettiContainer);
+      
+      // Create multiple bursts of confetti
+      for (let burst = 0; burst < 3; burst++) {
+        setTimeout(() => {
+          for (let i = 0; i < 50; i++) {
+            const confetti = document.createElement('div');
+            const color = colors[Math.floor(Math.random() * colors.length)];
+            const size = Math.random() * 8 + 4;
+            const startX = Math.random() * window.innerWidth;
+            const startY = -20;
+            
+            confetti.style.cssText = `
+              position: absolute;
+              width: ${size}px;
+              height: ${size}px;
+              background-color: ${color};
+              left: ${startX}px;
+              top: ${startY}px;
+              border-radius: ${Math.random() > 0.5 ? '50%' : '0'};
+              transform: rotate(${Math.random() * 360}deg);
+              animation: confettiFall ${2 + Math.random() * 2}s linear forwards;
+            `;
+            
+            confettiContainer.appendChild(confetti);
+          }
+        }, burst * 200);
+      }
+      
+      // Remove confetti container after animation
+      setTimeout(() => {
+        confettiContainer.remove();
+      }, 5000);
+    }
+
+    async function handleSubmit(e) {
+      e.preventDefault();
+      
+      if (isSubmitting) return;
+      
+      if (allGames.length >= 999) {
+        showMessage('Maximum limit of 999 games reached. Please delete some games first.', true);
+        return;
+      }
+
+      isSubmitting = true;
+      const submitButton = document.getElementById('submit-button');
+      const originalText = submitButton.textContent;
+      submitButton.textContent = isOnline ? 'Saving...' : 'Saving Offline...';
+      submitButton.disabled = true;
+
+      const fieldGoalsMade = parseInt(document.getElementById('field_goals_made').value);
+      const fieldGoalsAttempted = parseInt(document.getElementById('field_goals_attempted').value);
+      const threePointersMade = parseInt(document.getElementById('three_pointers_made').value);
+      const threePointersAttempted = parseInt(document.getElementById('three_pointers_attempted').value);
+      const freeThrowsMade = parseInt(document.getElementById('free_throws_made').value);
+      const freeThrowsAttempted = parseInt(document.getElementById('free_throws_attempted').value);
+
+      // Calculate percentages
+      const totalFieldGoalsMade = fieldGoalsMade + threePointersMade;
+      const totalFieldGoalsAttempted = fieldGoalsAttempted + threePointersAttempted;
+      
+      const overallFgPercentage = totalFieldGoalsAttempted > 0 ? 
+        Math.round((totalFieldGoalsMade / totalFieldGoalsAttempted) * 100) : 0;
+      const twoPointPercentage = fieldGoalsAttempted > 0 ? 
+        Math.round((fieldGoalsMade / fieldGoalsAttempted) * 100) : 0;
+      const threePointPercentage = threePointersAttempted > 0 ? 
+        Math.round((threePointersMade / threePointersAttempted) * 100) : 0;
+      const freeThrowPercentage = freeThrowsAttempted > 0 ? 
+        Math.round((freeThrowsMade / freeThrowsAttempted) * 100) : 0;
+
+      const gameResult = document.getElementById('result').value;
+
+      const gameData = {
+        game_date: document.getElementById('game_date').value,
+        home_team: document.getElementById('home_team').value,
+        away_team: document.getElementById('away_team').value,
+        final_score: document.getElementById('final_score').value,
+        game_format: gameFormat,
+        points: parseInt(document.getElementById('points').value),
+        rebounds: parseInt(document.getElementById('rebounds').value),
+        assists: parseInt(document.getElementById('assists').value),
+        steals: parseInt(document.getElementById('steals').value),
+        blocks: parseInt(document.getElementById('blocks').value),
+        turnovers: parseInt(document.getElementById('turnovers').value),
+        fouls: parseInt(document.getElementById('fouls').value),
+        minutes_played: parseInt(document.getElementById('minutes_played').value),
+        field_goals_made: fieldGoalsMade,
+        field_goals_attempted: fieldGoalsAttempted,
+        three_pointers_made: threePointersMade,
+        three_pointers_attempted: threePointersAttempted,
+        free_throws_made: freeThrowsMade,
+        free_throws_attempted: freeThrowsAttempted,
+        overall_fg_percentage: overallFgPercentage,
+        two_point_percentage: twoPointPercentage,
+        three_point_percentage: threePointPercentage,
+        free_throw_percentage: freeThrowPercentage,
+        result: gameResult,
+        notes: document.getElementById('notes').value,
+        period_stats: JSON.stringify(periodStats)
+      };
+
+      if (isOnline) {
+        // Try to save online
+        const result = await window.dataSdk.create(gameData);
+
+        if (result.isOk) {
+          document.getElementById('stats-form').reset();
+          resetLiveStats();
+          clearLocalStorageBackup();
+          
+          // Trigger confetti animation for wins!
+          if (gameResult === 'Win') {
+            createConfetti();
+            showMessage('🏆 Victory! Game stats saved successfully!', false);
+          } else {
+            showMessage('Game stats saved successfully!', false);
+          }
+        } else {
+          // If online save fails, save offline
+          pendingGameData = gameData;
+          localStorage.setItem('pendingGameData', JSON.stringify(gameData));
+          showMessage('⚠️ Save failed - game saved offline and will sync when connection is restored!', false);
+          
+          document.getElementById('stats-form').reset();
+          resetLiveStats();
+        }
+      } else {
+        // Save offline
+        pendingGameData = gameData;
+        localStorage.setItem('pendingGameData', JSON.stringify(gameData));
+        showMessage('📱 Game saved offline! Will sync automatically when you\'re back online.', false);
+        
+        document.getElementById('stats-form').reset();
+        resetLiveStats();
+      }
+
+      submitButton.textContent = originalText;
+      submitButton.disabled = false;
+      isSubmitting = false;
+    }
+
+    async function deleteGame(backendId) {
+      const game = allGames.find(g => g.__backendId === backendId);
+      if (!game) return;
+
+      // Show confirmation modal
+      showDeleteConfirmation(game);
+    }
+
+    function showDeleteConfirmation(game) {
+      const gameDate = new Date(game.game_date);
+      const formattedDate = gameDate.toLocaleDateString('en-US', { 
+        month: 'short', 
+        day: 'numeric', 
+        year: 'numeric' 
+      });
+
+      // Create modal overlay
+      const modal = document.createElement('div');
+      modal.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(0, 0, 0, 0.8);
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        z-index: 1000;
+        padding: 20px;
+        box-sizing: border-box;
+      `;
+      
+      const config = window.elementSdk?.config || defaultConfig;
+      const backgroundColor = config.background_color || defaultConfig.background_color;
+      const textColor = config.text_color || defaultConfig.text_color;
+      const primaryColor = config.primary_action_color || defaultConfig.primary_action_color;
+      
+      modal.innerHTML = `
+        <div style="
+          background-color: ${backgroundColor};
+          color: ${textColor};
+          padding: 30px;
+          border-radius: 15px;
+          max-width: 500px;
+          width: 100%;
+          box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+          text-align: center;
+        ">
+          <div style="margin-bottom: 20px;">
+            <div style="font-size: 48px; margin-bottom: 15px;">⚠️</div>
+            <h2 style="margin: 0 0 15px 0; font-size: 24px; font-weight: bold;">Delete Game?</h2>
+            <p style="margin: 0; font-size: 16px; opacity: 0.9; line-height: 1.4;">
+              Are you sure you want to delete the game from <strong>${formattedDate}</strong>?<br>
+              <span style="opacity: 0.7;">${game.home_team} vs ${game.away_team}</span>
+            </p>
+            <p style="margin: 15px 0 0 0; font-size: 14px; opacity: 0.7; color: #ef4444;">
+              This action cannot be undone.
+            </p>
+          </div>
+          
+          <div style="display: flex; gap: 15px; justify-content: center;">
+            <button onclick="this.closest('.delete-modal-overlay').remove()" style="
+              padding: 12px 24px;
+              background-color: transparent;
+              color: ${textColor};
+              border: 2px solid ${textColor};
+              border-radius: 8px;
+              font-weight: bold;
+              cursor: pointer;
+              transition: all 0.2s;
+              font-size: 16px;
+            " onmouseover="this.style.opacity='0.7'" onmouseout="this.style.opacity='1'">
+              CANCEL
+            </button>
+            <button onclick="confirmDeleteGame('${game.__backendId}')" style="
+              padding: 12px 24px;
+              background-color: #ef4444;
+              color: white;
+              border: none;
+              border-radius: 8px;
+              font-weight: bold;
+              cursor: pointer;
+              transition: all 0.2s;
+              font-size: 16px;
+            " onmouseover="this.style.backgroundColor='#dc2626'" onmouseout="this.style.backgroundColor='#ef4444'">
+              DELETE GAME
+            </button>
+          </div>
+        </div>
+      `;
+      
+      modal.className = 'delete-modal-overlay';
+      document.body.appendChild(modal);
+      
+      // Close modal when clicking outside
+      modal.addEventListener('click', (e) => {
+        if (e.target === modal) {
+          modal.remove();
+        }
+      });
+    }
+
+    async function confirmDeleteGame(backendId) {
+      // Close the confirmation modal
+      const modal = document.querySelector('.delete-modal-overlay');
+      if (modal) modal.remove();
+
+      const game = allGames.find(g => g.__backendId === backendId);
+      if (!game) return;
+
+      const result = await window.dataSdk.delete(game);
+
+      if (result.isOk) {
+        showMessage('Game deleted successfully!', false);
+      } else {
+        showMessage('Failed to delete game. Please try again.', true);
+      }
+    }
+
+    function showMessage(message, isError) {
+      const config = window.elementSdk?.config || defaultConfig;
+      const textColor = config.text_color || defaultConfig.text_color;
+      
+      const messageDiv = document.createElement('div');
+      messageDiv.textContent = message;
+      messageDiv.style.cssText = `
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        padding: 16px 24px;
+        border-radius: 8px;
+        font-weight: bold;
+        z-index: 1000;
+        background-color: ${isError ? '#ef4444' : '#10b981'};
+        color: ${textColor};
+      `;
+      document.body.appendChild(messageDiv);
+
+      setTimeout(() => {
+        messageDiv.remove();
+      }, 3000);
+    }
+
+    window.deleteGame = deleteGame;
+    window.confirmDeleteGame = confirmDeleteGame;
+    window.shareGame = shareGame;
+    window.copyToClipboard = copyToClipboard;
+    window.openInNewWindow = openInNewWindow;
+
+    async function init() {
+      // Check for pending game data from previous session
+      try {
+        const savedPendingGame = localStorage.getItem('pendingGameData');
+        if (savedPendingGame) {
+          pendingGameData = JSON.parse(savedPendingGame);
+        }
+      } catch (e) {
+        console.log('Could not restore pending game data');
+      }
+
+      const dataResult = await window.dataSdk.init(dataHandler);
+      if (!dataResult.isOk) {
+        console.error('Failed to initialize data SDK');
+        return;
+      }
+
+      if (window.elementSdk) {
+        window.elementSdk.init({
+          defaultConfig,
+          onConfigChange,
+          mapToCapabilities: (config) => ({
+            recolorables: [
+              {
+                get: () => config.background_color || defaultConfig.background_color,
+                set: (value) => {
+                  config.background_color = value;
+                  window.elementSdk.setConfig({ background_color: value });
+                }
+              },
+              {
+                get: () => config.surface_color || defaultConfig.surface_color,
+                set: (value) => {
+                  config.surface_color = value;
+                  window.elementSdk.setConfig({ surface_color: value });
+                }
+              },
+              {
+                get: () => config.text_color || defaultConfig.text_color,
+                set: (value) => {
+                  config.text_color = value;
+                  window.elementSdk.setConfig({ text_color: value });
+                }
+              },
+              {
+                get: () => config.primary_action_color || defaultConfig.primary_action_color,
+                set: (value) => {
+                  config.primary_action_color = value;
+                  window.elementSdk.setConfig({ primary_action_color: value });
+                }
+              },
+              {
+                get: () => config.secondary_action_color || defaultConfig.secondary_action_color,
+                set: (value) => {
+                  config.secondary_action_color = value;
+                  window.elementSdk.setConfig({ secondary_action_color: value });
+                }
+              }
+            ],
+            borderables: [],
+            fontEditable: undefined,
+            fontSizeable: undefined
+          }),
+          mapToEditPanelValues: (config) => new Map([
+            ["player_name", config.player_name || defaultConfig.player_name],
+            ["team_name", config.team_name || defaultConfig.team_name]
+          ])
+        });
+      }
+
+      renderApp();
+      
+      // Try to restore previous game state if available
+      const restored = loadFromLocalStorage();
+      if (restored) {
+        updateLiveStatsDisplay();
+        updateFormInputs();
+        updatePeriodDisplay();
+        updatePeriodStatsDisplay();
+        
+        // Enable undo button if there are actions
+        const undoButton = document.getElementById('undo-button');
+        if (undoButton && undoStack.length > 0) {
+          undoButton.disabled = false;
+        }
+        
+        showMessage('📱 Previous game data restored from backup!', false);
+      }
+      
+      // Update network status
+      updateNetworkStatus();
+      
+      // Try to submit pending game if online
+      if (isOnline && pendingGameData) {
+        setTimeout(() => {
+          submitPendingGame();
+        }, 2000); // Wait 2 seconds after app loads
+      }
+    }
+
+    init();
+  </script>
+ <script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'99a67a5ec4821441',t:'MTc2MjQ1MTg5Ni4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</html>
